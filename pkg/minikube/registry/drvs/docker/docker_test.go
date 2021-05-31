@@ -21,18 +21,22 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/minikube/pkg/drivers/kic/oci"
 	"k8s.io/minikube/pkg/minikube/driver"
 )
 
 type testCase struct {
-	version, expect   string
+	version           string
+	expectReason      string
+	expectError       error
 	expectFixContains string
 }
 
-func appendVersionVariations(tc []testCase, v []int, reason string) []testCase {
+func appendVersionVariations(tc []testCase, v []int, reason string, err error) []testCase {
 	appendedTc := append(tc, testCase{
-		version: fmt.Sprintf("linux-%02d.%02d", v[0], v[1]),
-		expect:  reason,
+		version:      fmt.Sprintf("linux-%02d.%02d", v[0], v[1]),
+		expectReason: reason,
+		expectError:  err,
 	})
 
 	// postfix string for unstable channel or patch. https://docs.docker.com/engine/install/
@@ -41,12 +45,14 @@ func appendVersionVariations(tc []testCase, v []int, reason string) []testCase {
 	vs := fmt.Sprintf("%02d.%02d.%d", v[0], v[1], v[2])
 	appendedTc = append(appendedTc, []testCase{
 		{
-			version: fmt.Sprintf("linux-%s", vs),
-			expect:  reason,
+			version:      fmt.Sprintf("linux-%s", vs),
+			expectReason: reason,
+			expectError:  err,
 		},
 		{
-			version: fmt.Sprintf("linux-%s-%s", vs, patchPostFix),
-			expect:  reason,
+			version:      fmt.Sprintf("linux-%s-%s", vs, patchPostFix),
+			expectReason: reason,
+			expectError:  err,
 		},
 	}...,
 	)
@@ -57,16 +63,19 @@ func appendVersionVariations(tc []testCase, v []int, reason string) []testCase {
 func TestCheckDockerVersion(t *testing.T) {
 	tc := []testCase{
 		{
-			version: "windows-20.0.1",
-			expect:  "PROVIDER_DOCKER_WINDOWS_CONTAINERS",
+			version:      "windows-20.0.1",
+			expectReason: "PROVIDER_DOCKER_WINDOWS_CONTAINERS",
+			expectError:  oci.ErrWindowsContainers,
 		},
 		{
-			version: fmt.Sprintf("linux-%02d.%02d", minDockerVersion[0], minDockerVersion[1]),
-			expect:  "",
+			version:      fmt.Sprintf("linux-%02d.%02d", minDockerVersion[0], minDockerVersion[1]),
+			expectReason: "",
+			expectError:  nil,
 		},
 		{
-			version: fmt.Sprintf("linux-%02d.%02d.%02d", minDockerVersion[0], minDockerVersion[1], minDockerVersion[2]),
-			expect:  "",
+			version:      fmt.Sprintf("linux-%02d.%02d.%02d", minDockerVersion[0], minDockerVersion[1], minDockerVersion[2]),
+			expectReason: "",
+			expectError:  nil,
 		},
 	}
 
@@ -75,35 +84,38 @@ func TestCheckDockerVersion(t *testing.T) {
 		copy(v, minDockerVersion)
 
 		v[i] = minDockerVersion[i] + 1
-		tc = appendVersionVariations(tc, v, "")
+		tc = appendVersionVariations(tc, v, "", nil)
 
 		v[i] = minDockerVersion[i] - 1
 		if v[2] < 0 {
 			// skip test if patch version is negative number.
 			continue
 		}
-		tc = appendVersionVariations(tc, v, "PROVIDER_DOCKER_VERSION_LOW")
+		tc = appendVersionVariations(tc, v, "PROVIDER_DOCKER_VERSION_LOW", oci.ErrMinDockerVersion)
 	}
 
 	tc = append(tc, []testCase{
 		{
 			// "dev" is set when Docker (Moby) was installed with `make binary && make install`
-			version: "linux-dev",
-			expect:  "",
+			version:      "linux-dev",
+			expectReason: "",
+			expectError:  nil,
 			expectFixContains: fmt.Sprintf("Install the official release of %s (Minimum recommended version is %02d.%02d.%d, current version is dev)",
 				driver.FullName(driver.Docker), minDockerVersion[0], minDockerVersion[1], minDockerVersion[2]),
 		},
 		{
 			// "library-import" is set when Docker (Moby) was installed with `go build github.com/docker/docker/cmd/dockerd` (unrecommended, but valid)
-			version: "linux-library-import",
-			expect:  "",
+			version:      "linux-library-import",
+			expectReason: "",
+			expectError:  nil,
 			expectFixContains: fmt.Sprintf("Install the official release of %s (Minimum recommended version is %02d.%02d.%d, current version is library-import)",
 				driver.FullName(driver.Docker), minDockerVersion[0], minDockerVersion[1], minDockerVersion[2]),
 		},
 		{
 			// "foo.bar.baz" is a triplet that cannot be parsed as "%02d.%02d.%d"
-			version: "linux-foo.bar.baz",
-			expect:  "",
+			version:      "linux-foo.bar.baz",
+			expectReason: "",
+			expectError:  nil,
 			expectFixContains: fmt.Sprintf("Install the official release of %s (Minimum recommended version is %02d.%02d.%d, current version is foo.bar.baz)",
 				driver.FullName(driver.Docker), minDockerVersion[0], minDockerVersion[1], minDockerVersion[2]),
 		},
@@ -112,9 +124,12 @@ func TestCheckDockerVersion(t *testing.T) {
 	for _, c := range tc {
 		t.Run("checkDockerVersion test", func(t *testing.T) {
 			s := checkDockerVersion(c.version)
+			if c.expectReason != s.Reason {
+				t.Errorf("Reason %v expected. but got %q. (version string : %s)", c.expectReason, s.Reason, c.version)
+			}
 			if s.Error != nil {
-				if c.expect != s.Reason {
-					t.Errorf("Error %v expected. but got %q. (version string : %s)", c.expect, s.Reason, c.version)
+				if c.expectError != s.Error {
+					t.Errorf("Error %v expected. but got %q. (version string : %s)", c.expectError, s.Error, c.version)
 				}
 			}
 			if c.expectFixContains != "" {
